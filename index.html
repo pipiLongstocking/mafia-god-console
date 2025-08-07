@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mafia God — Orchestrator</title>
+  <!-- Tailwind via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bg: '#0b0f14',
+            card: '#121826',
+            accent: '#7c3aed',
+            accent2: '#06b6d4',
+            text: '#e5e7eb',
+            subtle: '#94a3b8',
+            mafia: '#ef4444',
+            police: '#3b82f6',
+            doctor: '#22c55e',
+            villager: '#a3a3a3',
+            dead: '#6b7280'
+          },
+          boxShadow: {
+            glow: '0 0 0 1px rgba(124, 58, 237, 0.2), 0 10px 25px rgba(124, 58, 237, 0.15)'
+          }
+        }
+      }
+    }
+  </script>
+  <!-- React 18 + ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel (so we can write JSX in a single file) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body { background:#0b0f14; color:#e5e7eb; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    .tap { -webkit-tap-highlight-color: transparent; }
+    .role-pill { border:1px solid rgba(255,255,255,0.08); }
+    .glass { background: linear-gradient(to bottom right, rgba(255,255,255,0.06), rgba(255,255,255,0.02)); backdrop-filter: blur(6px); }
+  </style>
+</head>
+<body class="min-h-screen text-text antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // ---------- Utilities ----------
+    const uid = () => Math.random().toString(36).slice(2, 10);
+    const loadLS = (k, fallback) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
+    const saveLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+    const ROLE_KEYS = { MAFIA: 'Mafia', POLICE: 'Police', DOCTOR: 'Doctor', VILLAGER: 'Villager' };
+
+    const defaultSettings = {
+      roleNames: { mafia: 'Mafia', police: 'Police', doctor: 'Doctor', villager: 'Villager' },
+      allowMultipleDoctors: false,
+      allowMultiplePolice: true,
+      policeName: 'Police',
+      nightOrder: ['Mafia', 'Doctor', 'Police'],
+      confirmReveals: true
+    };
+
+    const defaultState = {
+      players: [], // {id,name,role,alive,revealed}
+      counts: { mafia: 0, police: 0, doctor: 1 },
+      phase: 'setup', // setup | night | day | over
+      nightNumber: 0,
+      dayNumber: 0,
+      logs: { nights: [], days: [] },
+      recap: null,
+      warnings: [],
+    };
+
+    const STORAGE_KEY = 'mafia-god-state-v1';
+    const SETTINGS_KEY = 'mafia-god-settings-v1';
+
+    // Suggest optimal role distribution based on player count
+    function suggestRoles(n) {
+      const mafia = Math.max(1, Math.ceil(n / 4));
+      const police = n >= 6 ? 1 : 0;
+      const doctor = n >= 5 ? 1 : 0;
+      return { mafia, police, doctor };
+    }
+
+    function warnBalance(n, counts) {
+      const w = [];
+      if (counts.mafia > Math.floor(n / 2)) w.push('Way too many Mafias.');
+      if (n >= 5 && counts.mafia < 1) w.push('Add at least 1 Mafia.');
+      if (n >= 6 && counts.police < 1) w.push('Consider adding a Police.');
+      if (n >= 5 && counts.doctor < 1) w.push('Consider adding a Doctor.');
+      if (counts.mafia >= n - counts.mafia) w.push('Mafia count close to or exceeds non-mafia.');
+      return w;
+    }
+
+    // ---------- Components ----------
+
+    function App() {
+      const [settings, setSettings] = useState(() => loadLS(SETTINGS_KEY, defaultSettings));
+      const [state, setState] = useState(() => {
+        const s = loadLS(STORAGE_KEY, defaultState);
+        if (!s.players) s.players = [];
+        if (!s.counts) s.counts = { mafia:0, police:0, doctor:1 };
+        return s;
+      });
+      // NEW: top-level tab to isolate Role Reveal Center
+      const [activeTab, setActiveTab] = useState(() => loadLS('mafia-god-active-tab', 'game'));
+      useEffect(() => saveLS('mafia-god-active-tab', activeTab), [activeTab]);
+
+      useEffect(() => saveLS(STORAGE_KEY, state), [state]);
+      useEffect(() => saveLS(SETTINGS_KEY, settings), [settings]);
+
+      const alivePlayers = useMemo(() => state.players.filter(p => p.alive), [state.players]);
+
+      const totalPlayers = state.players.length;
+      const totalAssigned = state.counts.mafia + state.counts.police + state.counts.doctor;
+      const villagersCount = Math.max(0, totalPlayers - totalAssigned);
+
+      useEffect(() => {
+        const w = warnBalance(totalPlayers, state.counts);
+        setState(prev => ({ ...prev, warnings: w }));
+      }, [totalPlayers, state.counts.mafia, state.counts.police, state.counts.doctor]);
+
+      function addPlayer(name) {
+        if (!name) return;
+        const exists = state.players.some(p => p.name.toLowerCase() === name.toLowerCase());
+        if (exists) return alert('Player name already exists.');
+        setState(s => ({ ...s, players: [...s.players, { id: uid(), name, role: ROLE_KEYS.VILLAGER, alive: true, revealed: false }] }));
+      }
+
+      function removePlayer(id) {
+        setState(s => ({ ...s, players: s.players.filter(p => p.id !== id) }));
+      }
+
+      function toggleAlive(id) {
+        setState(s => ({ ...s, players: s.players.map(p => p.id === id ? { ...p, alive: !p.alive } : p) }));
+      }
+
+      function clearAll() {
+        if (!confirm('Clear players & game state?')) return;
+        setState({ ...defaultState });
+      }
+
+      function autoSuggest() {
+        const n = state.players.length;
+        const sug = suggestRoles(n);
+        setState(s => ({ ...s, counts: sug }));
+      }
+
+      function randomizeRoles() {
+        const n = state.players.length;
+        if (n === 0) return alert('Add players first.');
+        const req = state.counts;
+        const totalNeeded = req.mafia + req.police + req.doctor;
+        if (totalNeeded > n) return alert('Not enough players for the selected role counts.');
+
+        const ids = [...state.players.map(p => p.id)];
+        for (let i = ids.length - 1; i > 0; i--) { const j = Math.floor(Math.random()* (i+1)); [ids[i], ids[j]] = [ids[j], ids[i]]; }
+
+        const assign = new Map();
+        let idx = 0;
+        const take = (count, role) => { for (let k=0; k<count; k++) assign.set(ids[idx++], role); };
+        take(req.mafia, ROLE_KEYS.MAFIA);
+        take(req.police, ROLE_KEYS.POLICE);
+        take(req.doctor, ROLE_KEYS.DOCTOR);
+        while (idx < ids.length) assign.set(ids[idx++], ROLE_KEYS.VILLAGER);
+
+        setState(s => ({
+          ...s,
+          players: s.players.map(p => ({ ...p, role: assign.get(p.id), alive: true, revealed: false })),
+          phase: 'setup'
+        }));
+      }
+
+      function startGame() {
+        if (state.players.length < 4) return alert('Need at least 4 players.');
+        const mafiaCount = state.players.filter(p => p.role === ROLE_KEYS.MAFIA).length;
+        if (mafiaCount === 0) return alert('Randomize roles first.');
+        setState(s => ({ ...s, phase: 'night', nightNumber: 1, dayNumber: 0, logs: { nights: [], days: [] }, recap: null }));
+      }
+
+      function endGame() {
+        if (!confirm('End this game and save a recap?')) return;
+        const recap = {
+          endedAt: new Date().toISOString(),
+          players: state.players,
+          logs: state.logs,
+        };
+        setState(s => ({ ...defaultState, recap }));
+      }
+
+      function reviveAll() {
+        setState(s => ({ ...s, players: s.players.map(p => ({ ...p, alive:true })) }));
+      }
+
+      return (
+        <div className="min-h-screen bg-bg">
+          <Header onClear={clearAll} onRevive={reviveAll} state={state} settings={settings} setSettings={setSettings} />
+
+          {/* NEW: Tab bar */}
+          <nav className="sticky top-[56px] z-30 bg-bg/90 backdrop-blur border-b border-white/5">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-2 flex gap-2">
+              <button
+                className={`px-3 py-2 rounded-lg border ${activeTab==='game' ? 'bg-accent text-white border-accent/60' : 'bg-card text-subtle border-white/10'}`}
+                onClick={()=>setActiveTab('game')}
+              >Game</button>
+              <button
+                className={`px-3 py-2 rounded-lg border ${activeTab==='reveal' ? 'bg-accent text-white border-accent/60' : 'bg-card text-subtle border-white/10'}`}
+                onClick={()=>setActiveTab('reveal')}
+              >Role Reveal</button>
+            </div>
+          </nav>
+
+          <main className="max-w-6xl mx-auto p-4 sm:p-6 grid gap-4 sm:gap-6">
+            {activeTab === 'game' && (
+              <>
+                <div className="grid md:grid-cols-3 gap-4">
+                  <SetupCard
+                    state={state}
+                    setState={setState}
+                    settings={settings}
+                    addPlayer={addPlayer}
+                    removePlayer={removePlayer}
+                    autoSuggest={autoSuggest}
+                    randomizeRoles={randomizeRoles}
+                    startGame={startGame}
+                  />
+                  <GodDashboard state={state} settings={settings} toggleAlive={toggleAlive} />
+                  <LogsCard state={state} endGame={endGame} />
+                </div>
+
+                <PhasePanel state={state} setState={setState} settings={settings} />
+
+                {state.recap && <Recap recap={state.recap} />}
+              </>
+            )}
+
+            {activeTab === 'reveal' && (
+              <section className="rounded-2xl bg-card border border-white/10 p-4 sm:p-5">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-lg font-semibold">Role Reveal Center</h2>
+                  <div className="text-xs text-subtle">Private screen for showing roles</div>
+                </div>
+                <RevealCenter state={state} setState={setState} settings={settings} />
+              </section>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    function Header({ onClear, onRevive, state, settings, setSettings }) {
+      const [open, setOpen] = useState(false);
+      return (
+        <header className="sticky top-0 z-40 bg-bg/80 backdrop-blur border-b border-white/5">
+          <div className="max-w-6xl mx-auto p-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-accent/20 shadow-glow">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5 text-accent">
+                  <path d="M12 2l3 7h7l-5.5 4 2.5 7-7-4.5L5 20l2.5-7L2 9h7z" />
+                </svg>
+              </span>
+              <div>
+                <div className="text-xl font-semibold">Mafia God</div>
+                <div className="text-subtle text-xs">Local-first • Dark • Mobile-friendly</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button className="px-3 py-2 rounded-lg bg-card border border-white/5 hover:border-accent/40" onClick={onRevive} title="Revive everyone">Revive All</button>
+              <button className="px-3 py-2 rounded-lg bg-card border border-white/5 hover:border-accent/40" onClick={onClear}>New Session</button>
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={() => setOpen(true)}>Settings</button>
+            </div>
+          </div>
+          {open && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4" onClick={() => setOpen(false)}>
+              <div className="glass w-full max-w-lg rounded-2xl p-5 border border-white/10" onClick={e => e.stopPropagation()}>
+                <div className="text-lg font-semibold mb-3">Settings</div>
+                <div className="grid gap-3">
+                  <LabelInput label="Rename Seer to" value={settings.policeName} onChange={v => setSettings(s => ({ ...s, policeName: v, roleNames: { ...s.roleNames, police: v } }))} />
+                  <Toggle label="Allow >1 Police" checked={settings.allowMultiplePolice} onChange={v => setSettings(s => ({ ...s, allowMultiplePolice: v }))} />
+                  <Toggle label="Allow >1 Doctor" checked={settings.allowMultipleDoctors} onChange={v => setSettings(s => ({ ...s, allowMultipleDoctors: v }))} />
+                  <Toggle label="Confirm on role reveal" checked={settings.confirmReveals} onChange={v => setSettings(s => ({ ...s, confirmReveals: v }))} />
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button className="px-3 py-2 rounded-lg bg-card border border-white/5" onClick={() => setOpen(false)}>Close</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </header>
+      )
+    }
+
+    function LabelInput({ label, value, onChange, placeholder }) {
+      return (
+        <label className="grid gap-1">
+          <span className="text-sm text-subtle">{label}</span>
+          <input className="px-3 py-2 rounded-lg bg-card border border-white/10 outline-none focus:border-accent/50" value={value} placeholder={placeholder}
+            onChange={e => onChange(e.target.value)} />
+        </label>
+      )
+    }
+
+    function Toggle({ label, checked, onChange }) {
+      return (
+        <label className="flex items-center justify-between gap-3 p-2 rounded-lg bg-card border border-white/10">
+          <span className="text-sm">{label}</span>
+          <button onClick={() => onChange(!checked)} className={`w-12 h-7 rounded-full relative transition ${checked ? 'bg-accent' : 'bg-white/10'}`}>
+            <span className={`absolute top-0.5 ${checked ? 'left-6' : 'left-1'} h-6 w-6 bg-white rounded-full transition`}></span>
+          </button>
+        </label>
+      )
+    }
+
+    function SetupCard({ state, setState, settings, addPlayer, removePlayer, autoSuggest, randomizeRoles, startGame }) {
+      const [name, setName] = useState('');
+      const [counts, setCounts] = useState(state.counts);
+
+      useEffect(() => setCounts(state.counts), [state.counts]);
+
+      const canStart = state.players.length >= 4 && state.players.some(p => p.role === ROLE_KEYS.MAFIA);
+
+      function updateCounts(partial) {
+        const next = { ...counts, ...partial };
+        const limit = state.players.length;
+        next.mafia = Math.min(Math.max(0, next.mafia|0), limit);
+        next.police = Math.min(Math.max(0, next.police|0), settings.allowMultiplePolice ? limit : 1);
+        next.doctor = Math.min(Math.max(0, next.doctor|0), settings.allowMultipleDoctors ? limit : 1);
+        setCounts(next);
+        setState(s => ({ ...s, counts: next }));
+      }
+
+      const suggested = suggestRoles(state.players.length);
+
+      return (
+        <section className="rounded-2xl bg-card border border-white/10 p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">Setup</h2>
+            <div className="text-xs text-subtle">Local storage enabled</div>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="flex gap-2">
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Add player name" className="flex-1 px-3 py-2 rounded-lg bg-bg border border-white/10" onKeyDown={(e)=>{if(e.key==='Enter'){addPlayer(name.trim()); setName('');}}} />
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={() => { addPlayer(name.trim()); setName(''); }}>Add</button>
+            </div>
+
+            {state.players.length > 0 && (
+              <div className="max-h-40 overflow-auto no-scrollbar rounded-lg border border-white/10">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {state.players.map(p => (
+                      <tr key={p.id} className="odd:bg-white/5">
+                        <td className="px-3 py-2">{p.name}</td>
+                        <td className="px-3 py-2 text-right">
+                          <button className="text-subtle hover:text-red-400" onClick={() => removePlayer(p.id)}>Remove</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="grid grid-cols-3 gap-2">
+              <Num label={settings.roleNames.mafia} value={counts.mafia} setValue={v=>updateCounts({mafia:v})} />
+              <Num label={settings.policeName} value={counts.police} setValue={v=>updateCounts({police:v})} />
+              <Num label={settings.roleNames.doctor} value={counts.doctor} setValue={v=>updateCounts({doctor:v})} />
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-subtle">
+              <span>Suggested: {suggested.mafia} {settings.roleNames.mafia}, {suggested.police} {settings.policeName}, {suggested.doctor} {settings.roleNames.doctor}</span>
+              <button className="underline" onClick={autoSuggest}>Auto-suggest</button>
+            </div>
+
+            {state.warnings.length > 0 && (
+              <div className="text-xs text-yellow-300/90 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-2">{state.warnings.join(' ')}</div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <button className="px-3 py-2 rounded-lg bg-bg border border-white/10 hover:border-accent/40" onClick={randomizeRoles}>Randomize Roles</button>
+              <button disabled={!canStart} className={`px-3 py-2 rounded-lg ${canStart? 'bg-accent text-white' : 'bg-white/10 text-subtle cursor-not-allowed'}`} onClick={startGame}>Start Game</button>
+            </div>
+          </div>
+        </section>
+      )
+    }
+
+    function Num({ label, value, setValue }) {
+      return (
+        <div className="p-3 rounded-xl bg-bg border border-white/10 flex flex-col items-center">
+          <div className="text-xs text-subtle mb-1">{label}</div>
+          <div className="flex items-center gap-2">
+            <button className="px-2 py-1 rounded-lg bg-card border border-white/10" onClick={()=>setValue(Math.max(0,(value|0)-1))}>-</button>
+            <input type="number" className="w-16 text-center px-2 py-1 rounded-lg bg-card border border-white/10" value={value} onChange={e=>setValue(parseInt(e.target.value||0))} />
+            <button className="px-2 py-1 rounded-lg bg-card border border-white/10" onClick={()=>setValue((value|0)+1)}>+</button>
+          </div>
+        </div>
+      )
+    }
+
+    function GodDashboard({ state, settings, toggleAlive }) {
+      return (
+        <section className="rounded-2xl bg-card border border-white/10 p-4 sm:p-5">
+          <h2 className="text-lg font-semibold mb-3">God Dashboard</h2>
+          <div className="grid gap-2">
+            {state.players.length === 0 && <div className="text-subtle text-sm">Add players to begin.</div>}
+            {state.players.map(p => (
+              <div key={p.id} className={`flex items-center justify-between p-2 rounded-xl border role-pill ${p.alive? 'bg-white/5' : 'bg-black/30'} `}>
+                <div className="flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${p.alive? 'bg-green-500' : 'bg-dead'}`}></span>
+                  <div className="font-medium">{p.name}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <RoleBadge role={p.role} settings={settings} dead={!p.alive} />
+                  <button className="px-2 py-1 rounded-lg bg-bg border border-white/10 text-xs" onClick={() => toggleAlive(p.id)}>{p.alive? 'Kill' : 'Revive'}</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )
+    }
+
+    function RoleBadge({ role, settings, dead }) {
+      const key = role === ROLE_KEYS.MAFIA ? 'mafia' : role === ROLE_KEYS.POLICE ? 'police' : role === ROLE_KEYS.DOCTOR ? 'doctor' : 'villager';
+      const classMap = {
+        mafia: 'text-mafia border-mafia/30',
+        police: 'text-police border-police/30',
+        doctor: 'text-doctor border-doctor/30',
+        villager: 'text-villager border-villager/30'
+      };
+      return (
+        <span className={`px-2 py-1 rounded-lg text-xs border ${dead? 'text-dead border-dead/30' : classMap[key]}`}>{role}</span>
+      )
+    }
+
+    function LogsCard({ state, endGame }) {
+      return (
+        <section className="rounded-2xl bg-card border border-white/10 p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-lg font-semibold">Night & Day Log</h2>
+            <button className="px-3 py-2 rounded-lg bg-bg border border-white/10" onClick={endGame}>End Game & Save Recap</button>
+          </div>
+          <div className="grid gap-2 max-h-52 overflow-auto no-scrollbar">
+            {state.logs.nights.map((n, i) => (
+              <div key={i} className="text-sm text-subtle">🌙 Night {n.night}: {n.summary}</div>
+            ))}
+            {state.logs.days.map((d, i) => (
+              <div key={i} className="text-sm text-subtle">☀️ Day {d.day}: {d.summary}</div>
+            ))}
+            {state.logs.nights.length===0 && state.logs.days.length===0 && (
+              <div className="text-sm text-subtle">No events yet. Night & Day events will appear here automatically.</div>
+            )}
+          </div>
+        </section>
+      )
+    }
+
+    function PhasePanel({ state, setState, settings }) {
+      return (
+        <section className="rounded-2xl bg-card border border-white/10 p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">Game Flow</h2>
+            <div className="text-xs text-subtle">Phase: <span className="text-white font-semibold uppercase">{state.phase}</span></div>
+          </div>
+          {state.phase === 'setup' && (
+            <div className="text-sm text-subtle">Randomize roles and press <span className="text-white">Start Game</span> in Setup to begin.</div>
+          )}
+          {state.phase === 'night' && <NightWizard state={state} setState={setState} settings={settings} />}
+          {state.phase === 'day' && <DayVoting state={state} setState={setState} />}
+          {state.phase === 'over' && <div className="text-sm">Game over. Check recap below.</div>}
+        </section>
+      )
+    }
+
+    function NightWizard({ state, setState, settings }) {
+      const [step, setStep] = useState(0); // 0 mafia -> 1 doctor -> 2 police -> 3 resolve
+      const alive = state.players.filter(p => p.alive);
+
+      const mafia = state.players.filter(p => p.role === ROLE_KEYS.MAFIA && p.alive);
+      const nonMafia = alive.filter(p => p.role !== ROLE_KEYS.MAFIA);
+
+      const [mafiaTarget, setMafiaTarget] = useState(null);
+      const [doctorSave, setDoctorSave] = useState(null);
+      const [policeCheck, setPoliceCheck] = useState(null);
+      const policeLabel = settings.policeName || 'Police';
+
+      function next() { setStep(s => Math.min(3, s+1)); }
+      function back() { setStep(s => Math.max(0, s-1)); }
+
+      function resolveNight() {
+        const killed = mafiaTarget && (!doctorSave || doctorSave.id !== mafiaTarget.id) ? mafiaTarget : null;
+        let summary = '';
+        if (mafiaTarget) summary += `Mafia chose ${mafiaTarget.name}. `;
+        if (doctorSave) summary += `Doctor saved ${doctorSave.name}. `;
+        if (policeCheck) summary += `${policeLabel} checked ${policeCheck.name} (${policeCheck.role}). `;
+        if (killed) summary += `${killed.name} died.`; else summary += `No one died.`;
+
+        setState(s => ({
+          ...s,
+          players: s.players.map(p => killed && p.id === killed.id ? { ...p, alive:false } : p),
+          logs: { ...s.logs, nights: [...s.logs.nights, { night: s.nightNumber, summary, details: { mafiaTarget, doctorSave, policeCheck } }] },
+          phase: 'day',
+          dayNumber: s.dayNumber + 1
+        }));
+      }
+
+      return (
+        <div className="grid gap-4">
+          <div className="flex items-center gap-2 text-xs">
+            <StepBadge idx={0} step={step} label="Mafia selects victim" />
+            <StepBadge idx={1} step={step} label="Doctor chooses save" />
+            <StepBadge idx={2} step={step} label={`${settings.policeName || 'Police'} checks a role`} />
+            <StepBadge idx={3} step={step} label="Resolve night" />
+          </div>
+
+          {step === 0 && (
+            <Picker title="Mafia pick target" subtitle="Alive non-mafias only" options={nonMafia} selected={mafiaTarget} setSelected={setMafiaTarget} />
+          )}
+          {step === 1 && (
+            <Picker title="Doctor save" subtitle="Pick anyone (including self)" options={alive} selected={doctorSave} setSelected={setDoctorSave} />
+          )}
+          {step === 2 && (
+            <Picker title={`${policeLabel} check`} subtitle="Pick anyone to inspect" options={alive} selected={policeCheck} setSelected={setPoliceCheck} />
+          )}
+          {step === 3 && (
+            <div className="p-4 rounded-xl bg-bg border border-white/10">
+              <div className="text-sm">Confirm to resolve Night {state.nightNumber}.</div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between">
+            <button className="px-3 py-2 rounded-lg bg-bg border border-white/10" onClick={back} disabled={step===0}>Back</button>
+            {step < 3 ? (
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={next} disabled={step===0 && !mafiaTarget}>Next</button>
+            ) : (
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={resolveNight}>Resolve Night</button>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    function StepBadge({ idx, step, label }) {
+      const active = step >= idx;
+      return (
+        <span className={`px-2 py-1 rounded-lg text-[11px] border ${active? 'border-accent/40 text-white' : 'border-white/10 text-subtle'}`}>{label}</span>
+      )
+    }
+
+    function Picker({ title, subtitle, options, selected, setSelected }) {
+      return (
+        <div className="grid gap-2">
+          <div>
+            <div className="font-medium">{title}</div>
+            <div className="text-xs text-subtle">{subtitle}</div>
+          </div>
+          <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+            {options.map(o => (
+              <button key={o.id} onClick={() => setSelected(o)} className={`p-3 rounded-xl border role-pill text-left ${selected && selected.id===o.id ? 'border-accent bg-accent/10' : 'border-white/10 bg-white/5'}`}>
+                <div className="font-medium">{o.name}</div>
+                <div className="text-xs text-subtle">{o.role}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )
+    }
+
+    function DayVoting({ state, setState }) {
+      const alive = state.players.filter(p => p.alive);
+      const [votes, setVotes] = useState(() => Object.fromEntries(alive.map(p => [p.id, ''])));
+      const [result, setResult] = useState(null);
+
+      useEffect(() => {
+        setVotes(Object.fromEntries(alive.map(p => [p.id, ''])));
+        setResult(null);
+      }, [state.players.filter(p=>p.alive).length]);
+
+      function setVote(voterId, targetId) {
+        setVotes(v => ({ ...v, [voterId]: targetId }));
+      }
+
+      function tally() {
+        const counts = {};
+        Object.values(votes).forEach(t => { if (t) counts[t] = (counts[t]||0)+1; });
+        let max = 0, killedId = null, tie = false;
+        for (const [id, c] of Object.entries(counts)) {
+          if (c > max) { max = c; killedId = id; tie = false; }
+          else if (c === max) { tie = true; }
+        }
+        if (max === 0) return setResult({ type:'no-votes' });
+        if (tie) return setResult({ type:'tie', max, counts });
+        const killed = state.players.find(p => p.id === killedId);
+        setResult({ type:'kill', killed, max });
+      }
+
+      function confirmLynch() {
+        if (!result || result.type !== 'kill') return;
+        const killed = result.killed;
+        const summary = `Voting eliminated ${killed.name}.`;
+        setState(s => ({
+          ...s,
+          players: s.players.map(p => p.id===killed.id ? { ...p, alive:false } : p),
+          logs: { ...s.logs, days: [...s.logs.days, { day: s.dayNumber, summary, votes }] },
+          phase: 'night',
+          nightNumber: s.nightNumber + 1
+        }));
+      }
+
+      function continueNoElim() {
+        if (!result || (result.type !== 'tie' && result.type !== 'no-votes')) return;
+        const summary = result.type === 'tie' ? `Tie at ${result.max} votes. No elimination.` : 'No votes entered. No elimination.';
+        setState(s => ({
+          ...s,
+          logs: { ...s.logs, days: [...s.logs.days, { day: s.dayNumber, summary, votes }] },
+          phase: 'night',
+          nightNumber: s.nightNumber + 1
+        }));
+      }
+
+      return (
+        <div className="grid gap-4">
+          <div>
+            <div className="font-medium">Day {state.dayNumber} Voting</div>
+            <div className="text-xs text-subtle">Enter votes, tally, then proceed. Ties or no-votes will automatically continue without elimination.</div>
+          </div>
+
+          <div className="grid gap-2">
+            {alive.map(voter => (
+              <div key={voter.id} className="flex items-center gap-2 p-2 rounded-xl bg-bg border border-white/10">
+                <div className="w-36 text-sm">{voter.name}</div>
+                <select className="flex-1 px-2 py-2 rounded-lg bg-card border border-white/10" value={votes[voter.id]}
+                  onChange={e => setVote(voter.id, e.target.value)}>
+                  <option value="">— votes for —</option>
+                  {alive.filter(p => p.id !== voter.id).map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-2">
+            <button className="px-3 py-2 rounded-lg bg-bg border border-white/10" onClick={tally}>Tally</button>
+            {result?.type === 'kill' && (
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={confirmLynch}>Confirm Elimination</button>
+            )}
+            {(result?.type === 'tie' || result?.type === 'no-votes') && (
+              <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={continueNoElim}>Continue to Night</button>
+            )}
+          </div>
+
+          {result && (
+            <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-sm">
+              {result.type === 'no-votes' && <div>No votes entered. No one is eliminated. Proceed to Night.</div>}
+              {result.type === 'tie' && <div>Tie at {result.max} votes. No one is eliminated. Proceed to Night.</div>}
+              {result.type === 'kill' && <div>Eliminate: <span className="font-semibold">{result.killed.name}</span> ({result.killed.role}).</div>}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    function RevealCenter({ state, setState, settings }) {
+      const [open, setOpen] = useState(false);
+      const [selected, setSelected] = useState(null);
+
+      function reveal(p) {
+        setSelected(p);
+        setOpen(true);
+        if (settings.confirmReveals) return;
+        markRevealed(p.id);
+      }
+
+      function markRevealed(id) {
+        setState(s => ({ ...s, players: s.players.map(p => p.id===id ? { ...p, revealed:true } : p) }));
+      }
+
+      return (
+        <div className="grid gap-3">
+          <div className="text-xs text-subtle">Tap a player to reveal their role privately. This tab hides other UI to prevent leaks.</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            {state.players.map(p => (
+              <button key={p.id} className={`p-3 rounded-xl border role-pill text-left ${p.revealed ? 'opacity-80' : ''}`} onClick={() => reveal(p)}>
+                <div className="font-medium">{p.name}</div>
+                <div className="text-[11px] text-subtle">{p.revealed ? 'revealed' : 'hidden'}</div>
+              </button>
+            ))}
+          </div>
+
+          {open && selected && (
+            <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 no-scrollbar" onClick={() => setOpen(false)}>
+              <div className="w-full max-w-sm rounded-2xl p-6 text-center border border-white/10 glass" onClick={e => e.stopPropagation()}>
+                <div className="text-subtle text-xs mb-2">Show this screen only to <b>{selected.name}</b></div>
+                <div className="text-2xl font-bold mb-4">{selected.role}</div>
+                <div className="grid gap-2">
+                  <button className="px-3 py-2 rounded-lg bg-accent text-white" onClick={() => { markRevealed(selected.id); setOpen(false); }}>Got it</button>
+                  <button className="px-3 py-2 rounded-lg bg-bg border border-white/10" onClick={() => setOpen(false)}>Close</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    function Recap({ recap }) {
+      return (
+        <section className="max-w-6xl mx-auto rounded-2xl bg-card border border-white/10 p-4 sm:p-5 mt-4">
+          <h2 className="text-lg font-semibold mb-2">Last Game Recap</h2>
+          <div className="text-xs text-subtle mb-3">Saved at {new Date(recap.endedAt).toLocaleString()}</div>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <div className="font-semibold mb-1">Players</div>
+              <ul className="text-sm space-y-1">
+                {recap.players.map(p => (
+                  <li key={p.id} className="flex items-center justify-between">
+                    <span>{p.name}</span>
+                    <span className="text-subtle">{p.role}{!p.alive ? ' (died)' : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <div className="font-semibold mb-1">Events</div>
+              <div className="text-sm space-y-1">
+                {recap.logs.nights.map((n,i)=>(<div key={'rn'+i}>🌙 Night {n.night}: {n.summary}</div>))}
+                {recap.logs.days.map((d,i)=>(<div key={'rd'+i}>☀️ Day {d.day}: {d.summary}</div>))}
+              </div>
+            </div>
+          </div>
+        </section>
+      )
+    }
+
+    // Mount
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
+
